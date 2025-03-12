@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Depends
 from pydantic import BaseModel
-from typing import List, Annotated
+from typing import List, Annotated, Optional
 import models
 from database import engine, SessionLocal
 from sqlalchemy.orm import Session
@@ -21,6 +21,7 @@ class QuestionBase(BaseModel):
     choices: List[ChoiceBase]
 
 class ChoiceUpdate(BaseModel):
+    id : Optional[int]
     choice_text: str
     is_correct: bool
 
@@ -39,35 +40,37 @@ db_dependency = Annotated[Session, Depends(get_db)]
 @app.put("/edit/{question_id}")
 async def edit_question(
     question_id: int, 
-    request: QuestionUpdateRequest,  # Nhận toàn bộ dữ liệu từ body JSON
+    request: QuestionUpdateRequest,  
     db: db_dependency 
 ):
-    # 1️⃣ Kiểm tra xem câu hỏi có tồn tại không
     question = db.query(models.Questions).filter(models.Questions.id == question_id).first()
-
     if not question:
         raise HTTPException(status_code=404, detail="Question not found!")
-
-    # 2️⃣ Cập nhật nội dung câu hỏi
+    
     question.question_text = request.updated_question_text
-
-    # 3️⃣ Xóa tất cả các lựa chọn cũ của câu hỏi này
-    db.query(models.Choices).filter(models.Choices.question_id == question_id).delete()
-
-    # 4️⃣ Thêm danh sách lựa chọn mới
-    for choice in request.updated_choices:
-        new_choice = models.Choices(
-            choice_text=choice.choice_text,
-            is_correct=choice.is_correct,
-            question_id=question.id
-        )
-        db.add(new_choice)
-
-    # 5️⃣ Lưu thay đổi vào database
     db.commit()
-    db.refresh(question)  
+    existing_choices = {c.id: c for c in db.query(models.Choices).filter(models.Choices.question_id == question_id)} 
+    for new_choice in request.updated_choices:
+        if new_choice.id and new_choice.id in existing_choices:
+            existing_choice = existing_choices[new_choice.id]
+            existing_choice.choice_text = new_choice.choice_text
+            existing_choice.is_correct = new_choice.is_correct
+        else:
+            db_choice = models.Choices(
+                choice_text=new_choice.choice_text,
+                is_correct=new_choice.is_correct,
+                question_id=question.id 
+            )
+            db.add(db_choice)
+        # Xóa choice không có trong request
+    updated_ids = {choice.id for choice in request.updated_choices if choice.id}
+    for choice_id in existing_choices:
+        if choice_id not in updated_ids:
+            db.delete(existing_choices[choice_id])
+    db.commit()
+    return {"message": "Question and choice eidt successfully!"}  # Trả về phản hồi
 
-    return {"message": "Question and choices updated successfully!"}
+    return 
 
 @app.get("/delete/{question_id}")
 async def delete_question(question_id: int, db: db_dependency):
